@@ -1,0 +1,92 @@
+HLD use cases and thoughts for hotel booking system or any other transactional system
+
+API for hotels
+
+POST /api/v1/hotel 
+Return 201 
+{
+    "name": "",
+    "locality_id": 1,
+    "rooms": {
+        "total_room": 100,
+        "room_details: [
+            {
+                "room_type": "DELUXE",
+                "count" :50
+            }
+            
+        ]
+    }
+}
+
+
+PUT /api/v1/hotel/{hotelId} - Update the hotel/room details
+
+API for users
+
+POST /api/v1/search- Search for the hotel/room 
+
+{
+    "startDate": "",
+    "EndDate": "",
+    "RoomType": "",
+    "NumberOfRooms": 1
+
+}
+
+Response - 200, List of hotels with rooms available on those dates 
+
+
+POST /api/v1/reservation 
+{
+    "hotelId" : 1,
+    "reservationId": "<This will be used for idempotency key>",
+    "checkInDate": "",
+    "checkOutDate": "",
+    "roomDatails": [
+        {
+            "roomTypeId": "",
+            "roomId": 1
+        }
+    ]
+}
+
+
+
+REQUEST_RECEIVED -> When client sends the request
+RESERVED -> When lua script has decremented the count
+BOOKED -> When payment succeeded
+CANCELLED_WITH_PAYMENT -> When payment failed cancelled happened
+CANCELLED -> Cancelled for other reasons such as crash
+CANCELLED_WITH_TIMEOUT -> This can be updated when cancelled because payment was not done in the given timed window and hold key expired.
+
+Status flow for success path -> 
+
+REQUEST_RECEIVED -> RESERVED -> BOOKED
+
+Flow for reservation
+
+1. Send request to reservation service for booking through POST API call
+2. Reservation service adds an entry into the database with status REQUEST_RECEIVED.
+3. Reservation service makes a redis request for decrement the availabiltiy count with reservation id generated in step 2.
+    3.a) If request succeed, that is, availability is present then it decrement the count using lua script, also add a key with reservation id & count of rooms with a TTL.
+4. Reservation service sends an event asynchronously to kafka with this increment/decrement which is in background/async consumed by another servuce which updates database with counter value.
+5. Reservation service updates the status to db as RESERVED.
+6. Reservation service makes API call to the payment service.
+7. Payment service completes and respond back to reservation service.
+8. Reservation service updates the status to BOOKED and async send the event to Kafka for notification.
+9. Reservation service respond back with the reservation id and status to the client.
+
+
+Flow for failure when reservation service fails after decrementing the count
+
+1. Reservation service crashes after updating the redis script. Kafka event was or was not sent. DB update could have been happened or not happened.
+2. In this case, when TTL expires, it calls the expiry handler(running on same or other service), which checks the reservation db for the hold id, if the given hold key(resrvation id) is in not cancelled or booked state, it will decrement the value for this reservation in redis through lua script, and update the status in table as cancelled.
+
+Flow for failure when payment service fails when status is already in reserved
+
+Reservation service executes a lua script And sends a kafka event to update db. It also updates the status as CANCELLED_WITH_PAYMENT in db.
+
+Whenever reservation service crashes, states may be inconsistent. Another reconciliation service can be run in parallel in backgroun in separate service which checks for inconsistencies and update the states.
+
+
